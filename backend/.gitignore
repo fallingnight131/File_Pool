@@ -1,0 +1,50 @@
+# Uploaded files: keep directory placeholder only
+uploads/*
+!uploads/.gitkeep
+
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+
+# Databases and runtime artifacts
+*.db
+*.sqlite3
+instance/
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+
+# Test and analysis outputs
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# OS / editor files
+.DS_Store
+.idea/
+.vscode/
+
+# Keep explicit project db ignore
+filepool.db
