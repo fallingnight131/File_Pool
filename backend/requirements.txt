@@ -4,3 +4,5 @@ flask-cors==4.0.1
 apscheduler==3.10.4
 requests==2.32.3
 gunicorn==22.0.0
+cos-python-sdk-v5==1.9.30
+python-dotenv==1.1.0

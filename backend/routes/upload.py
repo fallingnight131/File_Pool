@@ -7,11 +7,66 @@ from flask import Blueprint, current_app, jsonify, request
 from sqlalchemy import func
 from werkzeug.utils import secure_filename
 
+from cos_client import upload_to_cos
 from models import File, db
 
 
 bp = Blueprint('upload', __name__)
 _upload_lock = threading.Lock()
+
+# COS 上传进度追踪（内存中）
+_cos_tasks = {}  # task_id -> {total, uploaded, status}
+_cos_tasks_lock = threading.Lock()
+
+
+def _run_cos_upload(app, task_id, file_records):
+    """后台线程：将文件从服务器分片上传到 COS。"""
+    with app.app_context():
+        total_size = sum(r['size'] for r in file_records)
+        cumulative = 0
+
+        try:
+            for rec in file_records:
+                base = cumulative
+
+                def _on_progress(uploaded, _total, _base=base):
+                    with _cos_tasks_lock:
+                        task = _cos_tasks.get(task_id)
+                        if task:
+                            task['uploaded'] = _base + uploaded
+
+                upload_to_cos(
+                    app.config,
+                    rec['local_path'],
+                    rec['cos_key'],
+                    rec['size'],
+                    progress_callback=_on_progress,
+                )
+                cumulative += rec['size']
+
+                file_obj = File.query.get(rec['id'])
+                if file_obj:
+                    file_obj.cos_status = 'done'
+                    db.session.commit()
+
+            with _cos_tasks_lock:
+                task = _cos_tasks.get(task_id)
+                if task:
+                    task['uploaded'] = total_size
+                    task['status'] = 'done'
+
+        except Exception as exc:
+            with _cos_tasks_lock:
+                task = _cos_tasks.get(task_id)
+                if task:
+                    task['status'] = 'failed'
+                    task['error'] = str(exc)
+
+            for rec in file_records:
+                file_obj = File.query.get(rec['id'])
+                if file_obj and file_obj.cos_status != 'done':
+                    file_obj.cos_status = 'failed'
+            db.session.commit()
 
 
 @bp.route('/api/upload', methods=['POST'])
@@ -29,6 +84,8 @@ def upload_files():
         file_obj.stream.seek(0)
 
     created_files = []
+    cos_records = []
+    cos_enabled = current_app.config.get('COS_ENABLED', False)
 
     with _upload_lock:
         used_bytes = db.session.query(func.sum(File.size)).filter_by(is_link=False).scalar() or 0
@@ -54,6 +111,7 @@ def upload_files():
                     mime_type=file_obj.mimetype,
                     is_link=False,
                     url=stored_name,
+                    cos_status='pending' if cos_enabled else None,
                     status='alive',
                     expire_at=expire_at,
                     created_at=now,
@@ -71,9 +129,61 @@ def upload_files():
                     }
                 )
 
+                if cos_enabled:
+                    cos_records.append(
+                        {
+                            'id': file_record.id,
+                            'local_path': save_path,
+                            'cos_key': stored_name,
+                            'size': file_record.size,
+                        }
+                    )
+
             db.session.commit()
         except Exception as exc:
             db.session.rollback()
             return jsonify({'error': f'上传失败: {str(exc)}'}), 500
 
-    return jsonify({'files': created_files})
+    result = {'files': created_files}
+
+    # 启动后台线程将文件上传到 COS
+    if cos_enabled and cos_records:
+        task_id = uuid.uuid4().hex
+        total_cos_size = sum(r['size'] for r in cos_records)
+        with _cos_tasks_lock:
+            _cos_tasks[task_id] = {
+                'total': total_cos_size,
+                'uploaded': 0,
+                'status': 'uploading',
+            }
+        result['task_id'] = task_id
+
+        app = current_app._get_current_object()
+        t = threading.Thread(target=_run_cos_upload, args=(app, task_id, cos_records), daemon=True)
+        t.start()
+
+    return jsonify(result)
+
+
+@bp.route('/api/upload/progress/<task_id>', methods=['GET'])
+def upload_progress(task_id):
+    """查询 COS 上传进度。"""
+    with _cos_tasks_lock:
+        task = _cos_tasks.get(task_id)
+        if not task:
+            return jsonify({'error': '任务不存在'}), 404
+
+        data = {
+            'total': task['total'],
+            'uploaded': task['uploaded'],
+            'status': task['status'],
+        }
+
+        # 终态任务第二次轮询后清理
+        if task['status'] in ('done', 'failed'):
+            if task.get('_polled'):
+                del _cos_tasks[task_id]
+            else:
+                task['_polled'] = True
+
+    return jsonify(data)

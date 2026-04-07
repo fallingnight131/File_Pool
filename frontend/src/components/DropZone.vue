@@ -1,7 +1,7 @@
 <script setup>
 import { inject, ref } from 'vue'
 
-import { uploadFiles } from '../api'
+import { uploadFiles, pollCosProgress } from '../api'
 
 const emit = defineEmits(['open-pool', 'open-link', 'toast'])
 const store = inject('store')
@@ -10,10 +10,33 @@ const fileInputRef = ref(null)
 const dragOver = ref(false)
 const uploading = ref(false)
 const progress = ref(0)
+const progressLabel = ref('')
 const uploadController = ref(null)
 
 function openNativePicker() {
   fileInputRef.value?.click()
+}
+
+async function waitForCos(taskId) {
+  while (true) {
+    const res = await pollCosProgress(taskId)
+    const { status, uploaded, total } = res.data
+
+    if (status === 'done') {
+      progress.value = 100
+      progressLabel.value = '上传完成'
+      break
+    }
+    if (status === 'failed') {
+      throw new Error('云存储上传失败')
+    }
+
+    const cosPercent = total > 0 ? uploaded / total : 0
+    progress.value = 60 + Math.round(cosPercent * 40)
+    progressLabel.value = '上传到云存储...'
+
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
 }
 
 async function uploadWithFiles(fileList) {
@@ -21,15 +44,25 @@ async function uploadWithFiles(fileList) {
   uploadController.value = new AbortController()
   uploading.value = true
   progress.value = 0
+  progressLabel.value = '上传到服务器...'
   try {
-    await uploadFiles(
+    const response = await uploadFiles(
       fileList,
       (evt) => {
         if (!evt.total) return
-        progress.value = Math.round((evt.loaded / evt.total) * 100)
+        progress.value = Math.round((evt.loaded / evt.total) * 60)
       },
       uploadController.value.signal
     )
+
+    const taskId = response.data.task_id
+    if (taskId) {
+      progressLabel.value = '上传到云存储...'
+      await waitForCos(taskId)
+    } else {
+      progress.value = 100
+    }
+
     emit('toast', '上传成功')
     await Promise.all([store.refreshFiles(), store.refreshStats()])
   } catch (error) {
@@ -41,12 +74,13 @@ async function uploadWithFiles(fileList) {
     if (status === 413) {
       emit('toast', '文件池已满，请先删除一些文件')
     } else {
-      emit('toast', error?.response?.data?.error || '网络错误，请稍后重试')
+      emit('toast', error?.response?.data?.error || error?.message || '网络错误，请稍后重试')
     }
   } finally {
     uploadController.value = null
     uploading.value = false
     progress.value = 0
+    progressLabel.value = ''
   }
 }
 
@@ -90,6 +124,7 @@ function handleDrop(event) {
     </div>
 
     <div v-if="uploading" class="progress" role="progressbar" :aria-valuenow="progress" aria-valuemin="0" aria-valuemax="100">
+      <div class="progress-label">{{ progressLabel }} {{ progress }}%</div>
       <div class="progress-track">
         <div class="progress-fill" :style="{ width: `${progress}%` }"></div>
       </div>
@@ -162,6 +197,12 @@ button.danger {
 
 .progress {
   width: min(420px, 80vw);
+}
+
+.progress-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
 }
 
 .progress-track {

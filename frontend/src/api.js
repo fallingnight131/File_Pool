@@ -10,9 +10,14 @@ export function uploadFiles(fileList, onUploadProgress, signal) {
   fileList.forEach((file) => formData.append('files[]', file))
   return client.post('/upload', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 0,
     onUploadProgress,
     signal,
   })
+}
+
+export function pollCosProgress(taskId) {
+  return client.get(`/upload/progress/${taskId}`)
 }
 
 export function uploadLink(payload) {

@@ -5,6 +5,7 @@ import requests
 from flask import Blueprint, current_app, jsonify, redirect, request, send_file
 from sqlalchemy import func
 
+from cos_client import delete_from_cos, get_cos_url
 from models import File, db
 
 
@@ -80,6 +81,10 @@ def delete_files():
     for item in records:
         found_ids.append(item.id)
         if not item.is_link and item.url:
+            # 从 COS 删除
+            if item.cos_status == 'done' and current_app.config.get('COS_ENABLED'):
+                delete_from_cos(current_app.config, item.url)
+            # 删除本地文件
             file_path = os.path.join(current_app.config['UPLOAD_FOLDER'], item.url)
             if os.path.exists(file_path):
                 try:
@@ -99,6 +104,11 @@ def download_file(file_id: int):
 
     if item.is_link:
         return redirect(item.url, code=302)
+
+    # COS 上传完成，重定向到 COS 外网 URL
+    if item.cos_status == 'done' and current_app.config.get('COS_ENABLED'):
+        cos_url = get_cos_url(current_app.config, item.url)
+        return redirect(cos_url, code=302)
 
     file_path = os.path.join(current_app.config['UPLOAD_FOLDER'], item.url)
     if not os.path.exists(file_path):

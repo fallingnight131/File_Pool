@@ -15,6 +15,7 @@ class File(db.Model):
     mime_type = db.Column(db.String(128))
     is_link = db.Column(db.Boolean, default=False)
     url = db.Column(db.Text)
+    cos_status = db.Column(db.String(16), default=None)  # pending / done / failed / None
     status = db.Column(db.String(16), default='alive')
     expire_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
