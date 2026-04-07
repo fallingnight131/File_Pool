@@ -5,18 +5,21 @@ from qcloud_cos import CosConfig, CosS3Client
 
 logger = logging.getLogger(__name__)
 
-_client = None
+# 内网客户端（上传/删除用）
+_upload_client = None
+# 外网客户端（生成签名 URL 用）
+_public_client = None
 _client_lock = threading.Lock()
 
 
-def _get_client(app_config):
-    """获取或创建 COS 客户端（单例）。"""
-    global _client
-    if _client is not None:
-        return _client
+def _get_upload_client(app_config):
+    """获取或创建内网 COS 客户端（上传/删除）。"""
+    global _upload_client
+    if _upload_client is not None:
+        return _upload_client
     with _client_lock:
-        if _client is not None:
-            return _client
+        if _upload_client is not None:
+            return _upload_client
         kwargs = {
             'Region': app_config['COS_REGION'],
             'SecretId': app_config['COS_SECRET_ID'],
@@ -26,13 +29,30 @@ def _get_client(app_config):
         endpoint = app_config.get('COS_INTERNAL_ENDPOINT', '')
         if endpoint:
             kwargs['Endpoint'] = endpoint
-        _client = CosS3Client(CosConfig(**kwargs))
-        return _client
+        _upload_client = CosS3Client(CosConfig(**kwargs))
+        return _upload_client
+
+
+def _get_public_client(app_config):
+    """获取或创建外网 COS 客户端（签名 URL）。"""
+    global _public_client
+    if _public_client is not None:
+        return _public_client
+    with _client_lock:
+        if _public_client is not None:
+            return _public_client
+        _public_client = CosS3Client(CosConfig(
+            Region=app_config['COS_REGION'],
+            SecretId=app_config['COS_SECRET_ID'],
+            SecretKey=app_config['COS_SECRET_KEY'],
+            Scheme='https',
+        ))
+        return _public_client
 
 
 def upload_to_cos(app_config, local_path, cos_key, file_size, progress_callback=None):
     """分片上传文件到 COS，支持进度回调 progress_callback(uploaded_bytes, total_bytes)。"""
-    client = _get_client(app_config)
+    client = _get_upload_client(app_config)
     bucket = app_config['COS_BUCKET']
     part_size = 5 * 1024 * 1024  # 5 MB
 
@@ -87,14 +107,18 @@ def upload_to_cos(app_config, local_path, cos_key, file_size, progress_callback=
 def delete_from_cos(app_config, cos_key):
     """删除 COS 上的对象。"""
     try:
-        client = _get_client(app_config)
+        client = _get_upload_client(app_config)
         client.delete_object(Bucket=app_config['COS_BUCKET'], Key=cos_key)
     except Exception as exc:
         logger.error('COS delete failed for %s: %s', cos_key, exc)
 
 
 def get_cos_url(app_config, cos_key):
-    """生成 COS 对象的外网下载 URL。"""
-    bucket = app_config['COS_BUCKET']
-    region = app_config['COS_REGION']
-    return f'https://{bucket}.cos.{region}.myqcloud.com/{cos_key}'
+    """生成 COS 对象的外网预签名下载 URL（私有读写）。"""
+    client = _get_public_client(app_config)
+    return client.get_presigned_url(
+        Method='GET',
+        Bucket=app_config['COS_BUCKET'],
+        Key=cos_key,
+        Expired=3600,
+    )
